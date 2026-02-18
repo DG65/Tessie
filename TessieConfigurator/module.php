@@ -95,7 +95,7 @@ class TessieConfigurator extends IPSModule
         // Create chain: WS Client -> TessieVehicle (Symcon will connect child to parent)
         $wsCfg = [
             'Active' => 1,
-            'Headers' => [],
+            'Headers' => "[]",
             'Type' => 0,
             'URL' => 'wss://streaming.tessie.com/' . $vin . '?access_token=' . $teleToken,
             'VerifyCertificate' => 1
