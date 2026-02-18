@@ -1,0 +1,12 @@
+{
+  "id": "{A9E66B36-2E8F-4F52-9E4D-1A1D2F0E6F40}",
+  "author": "Dietmar Gureth + Copilot",
+  "name": "Tessie for IP-Symcon",
+  "url": "https://developer.tessie.com/",
+  "compatibility": {
+    "version": "6.0"
+  },
+  "version": "1.1.2",
+  "build": 20260218,
+  "date": 1771400276
+}

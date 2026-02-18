@@ -1,0 +1,14 @@
+{
+  "id": "{7F7B979E-0D9F-4E4A-9C0D-2A3B1B0A4D21}",
+  "name": "TessieConfigurator",
+  "type": 4,
+  "vendor": "Tessie",
+  "aliases": [
+    "Tessie Configurator"
+  ],
+  "url": "https://developer.tessie.com/",
+  "parentRequirements": [],
+  "childRequirements": [],
+  "implemented": [],
+  "prefix": "TESSIE"
+}

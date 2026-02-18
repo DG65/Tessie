@@ -1,0 +1,18 @@
+{
+  "id": "{3F1F7E31-8BA0-4B8F-9B62-47DAD7A0B6C9}",
+  "name": "TessieVehicle",
+  "type": 3,
+  "vendor": "Tessie",
+  "aliases": [
+    "Tessie Vehicle (REST + Telemetry)"
+  ],
+  "url": "https://developer.tessie.com/",
+  "parentRequirements": [
+    "{018EF6B5-AB94-40C6-AA53-46943E824ACF}"
+  ],
+  "childRequirements": [],
+  "implemented": [
+    "{018EF6B5-AB94-40C6-AA53-46943E824ACF}"
+  ],
+  "prefix": "TESSIE"
+}
