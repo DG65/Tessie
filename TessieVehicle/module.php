@@ -25,7 +25,7 @@ class TessieVehicle extends IPSModule
         $this->RegisterPropertyBoolean('TelemetryEnabled', false);
         $this->RegisterPropertyInteger('UpdateInterval', 300);
 
-        $this->RegisterTimer('UpdateTimer', 0, 'TESSIE_Update($_IPS['TARGET']);');
+        $this->RegisterTimer('UpdateTimer', 0, 'TESSIE_Update($_IPS[\'TARGET\']);');
     }
 
     public function ApplyChanges(): void
