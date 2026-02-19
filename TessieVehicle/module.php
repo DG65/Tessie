@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 class TessieVehicle extends IPSModule
 {
-    // ---- Action-Idents (Variables) ----
+    // -------- Variable Idents (Actions) --------
     private const ACT_LOCKED         = 'act_locked';
     private const ACT_CLIMATE        = 'act_climate';
     private const ACT_START_CHARGING = 'act_charging';
@@ -12,40 +12,57 @@ class TessieVehicle extends IPSModule
     private const ACT_FLASH          = 'act_flash';
     private const ACT_HONK           = 'act_honk';
 
-    public function Create(): void
+    // -------- Timers --------
+    private const TIMER_UPDATE = 'UpdateTimer';
+
+    // -------- Properties --------
+    // ApiBase: Tessie API base, default https://api.tessie.com (Tessie Fleet API mirror is also available there) [15](https://developer.tessie.com/reference/access-tesla-fleet-api)[16](https://developer.tessie.com/reference/authentication)
+    public function Create()
     {
         parent::Create();
 
         $this->RegisterPropertyString('ApiToken', '');
         $this->RegisterPropertyString('VIN', '');
         $this->RegisterPropertyString('ApiBase', 'https://api.tessie.com');
-        $this->RegisterPropertyBoolean('TelemetryEnabled', false);
-        $this->RegisterPropertyInteger('UpdateInterval', 300);
 
-        $this->RegisterTimer('UpdateTimer', 0, "TESSIE_Update(\$_IPS['TARGET']);");
+        $this->RegisterPropertyInteger('UpdateInterval', 300);     // seconds
+        $this->RegisterPropertyBoolean('TelemetryEnabled', true);
+
+        // If enabled: try to wake vehicle before sending commands
+        $this->RegisterPropertyBoolean('WakeBeforeCommands', true);
+
+        // Wait for completion query flag (Tessie supports wait_for_completion on commands) [3](https://developer.tessie.com/reference/lock)[5](https://developer.tessie.com/reference/start-climate)[7](https://developer.tessie.com/reference/start-charging)[9](https://developer.tessie.com/reference/flash-lights)[10](https://developer.tessie.com/reference/honk)
+        $this->RegisterPropertyBoolean('WaitForCompletion', true);
+
+        $this->RegisterTimer(self::TIMER_UPDATE, 0, 'TESSIE_Update($_IPS["TARGET"]);');
     }
 
-    public function ApplyChanges(): void
+    public function ApplyChanges()
     {
         parent::ApplyChanges();
 
-        $interval = max(0, (int)$this->ReadPropertyInteger('UpdateInterval'));
-        $this->SetTimerInterval('UpdateTimer', $interval > 0 ? $interval * 1000 : 0);
+        // Timer interval
+        $interval = (int)$this->ReadPropertyInteger('UpdateInterval');
+        if ($interval < 0) {
+            $interval = 0;
+        }
+        $this->SetTimerInterval(self::TIMER_UPDATE, $interval > 0 ? $interval * 1000 : 0);
 
-        // Profiles müssen vor MaintainVariable existieren
+        // Profiles must exist before MaintainVariable uses them
         $this->ensureProfiles();
 
-        // Action-Setup darf Instanz-Erstellung nicht verhindern (ApplyChanges läuft beim Create/Übernehmen)
+        // Create action variables + links
         try {
             $this->ensureActionVariables();
         } catch (Throwable $e) {
-            $this->LogMessage('ensureActionVariables() übersprungen: ' . $e->getMessage(), KL_WARNING);
+            $this->LogMessage('ensureActionVariables failed: ' . $e->getMessage(), KL_WARNING);
         }
+
+        $this->SetStatus(102);
     }
 
-    // ---------------- Public API ----------------
-
-    public function Update(): void
+    // -------- Public helper called by timer --------
+    public function Update()
     {
         $token = trim($this->ReadPropertyString('ApiToken'));
         $vin   = trim($this->ReadPropertyString('VIN'));
@@ -53,40 +70,63 @@ class TessieVehicle extends IPSModule
             return;
         }
 
-        $path = $this->buildVehiclePath($vin, '/vehicle_data');
-        $data = $this->apiRequest($token, 'GET', $path);
-        $payload = $data['response'] ?? $data;
-        if (!is_array($payload)) {
-            return;
+        // Optional lightweight status check (asleep/awake). [13](https://developer.tessie.com/reference/get-status)
+        $status = $this->getVehicleStatus($vin, $token);
+        if ($status !== '') {
+            $this->SendDebug('Status', $status, 0);
         }
 
-        // Optional: Sync action vars from REST payload
-        $this->syncActionVarsFromRest($payload);
+        // If telemetry is enabled, updates will mostly come via WS. Still keep this for fallback.
     }
 
-    public function ReceiveData($JSONString): void
+    // -------- Dataflow: receive data from WebSocket I/O (Simple RX) --------
+    public function ReceiveData($JSONString)
     {
-        if (!$this->ReadPropertyBoolean('TelemetryEnabled')) {
+        if (!(bool)$this->ReadPropertyBoolean('TelemetryEnabled')) {
             return;
         }
 
-        $pkt = json_decode($JSONString, true);
-        if (!is_array($pkt)) {
+        $packet = json_decode($JSONString, true);
+        if (!is_array($packet)) {
             return;
         }
 
-        $buffer = utf8_decode((string)($pkt['Buffer'] ?? ''));
-        if ($buffer === '') {
+        // Simple RX: Buffer contains the payload as string [17](https://teslemetry.com/blog/vehicle-data-caching)[14](https://developer.tessie.com/reference/access-tesla-fleet-telemetry)
+        $buf = (string)($packet['Buffer'] ?? '');
+        if ($buf === '') {
             return;
         }
 
-        // Telemetry ist projektspezifisch; hier nur Debug, damit nichts crasht
-        $this->SendDebug('Telemetry', $buffer, 0);
+        // In Symcon the Buffer may be UTF-8 encoded already; do not utf8_decode blindly.
+        $payload = json_decode($buf, true);
+        if (!is_array($payload)) {
+            $this->SendDebug('Telemetry', 'Non-JSON buffer: ' . substr($buf, 0, 300), 0);
+            return;
+        }
+
+        // Log raw (useful for debugging)
+        $this->SendDebug('Telemetry', $buf, 0);
+
+        // Handle errors packets and connection status packets as seen in your dump [2](https://adsoba-my.sharepoint.com/personal/d_gureth_adsoba_de/Documents/Microsoft%20Copilot%20Chat-Dateien/dump.txt)[14](https://developer.tessie.com/reference/access-tesla-fleet-telemetry)
+        if (isset($payload['errors'])) {
+            $this->SendDebug('TelemetryErrors', json_encode($payload['errors']), 0);
+            return;
+        }
+        if (isset($payload['status']) && isset($payload['connectionId'])) {
+            $this->SendDebug('TelemetryConnection', json_encode($payload), 0);
+            return;
+        }
+
+        // Data packets: { data: [ {key, value}, ... ], createdAt, vin, isResend } [14](https://developer.tessie.com/reference/access-tesla-fleet-telemetry)[2](https://adsoba-my.sharepoint.com/personal/d_gureth_adsoba_de/Documents/Microsoft%20Copilot%20Chat-Dateien/dump.txt)
+        if (!isset($payload['data']) || !is_array($payload['data'])) {
+            return;
+        }
+
+        $this->syncActionVarsFromTelemetry($payload['data']);
     }
 
-    /**
-     * Wird von Symcon aufgerufen, wenn in der Visualisierung auf eine EnableAction-Variable geklickt wird. [2](https://github.com/demel42/IPSymconBuderusKM200)
-     */
+    // -------- Actions (IMPORTANT: IPSModule signature must be untyped) --------
+    // Symcon docs explicitly show IPSModule variant without type hints [1](https://www.symcon.de/de/service/dokumentation/entwicklerbereich/sdk-tools/sdk-php/module/requestaction/)
     public function RequestAction($Ident, $Value)
     {
         $token = trim($this->ReadPropertyString('ApiToken'));
@@ -96,155 +136,250 @@ class TessieVehicle extends IPSModule
             throw new Exception('ApiToken oder VIN fehlt.');
         }
 
-        switch ($Ident) {
+        switch ((string)$Ident) {
+
             case self::ACT_LOCKED:
-                $this->cmdSimple($vin, $token, ((bool)$Value) ? 'door_lock' : 'door_unlock');
-                SetValueBoolean($this->GetIDForIdent($Ident), (bool)$Value);
+                // Tessie: lock/unlock [3](https://developer.tessie.com/reference/lock)[4](https://developer.tessie.com/reference/unlock)
+                $wantLocked = (bool)$Value;
+                $this->sendCommand($vin, $token, $wantLocked ? 'lock' : 'unlock');
+                $this->safeSetValue(self::ACT_LOCKED, $wantLocked);
                 break;
 
             case self::ACT_CLIMATE:
-                $this->cmdSimple($vin, $token, ((bool)$Value) ? 'auto_conditioning_start' : 'auto_conditioning_stop');
-                SetValueBoolean($this->GetIDForIdent($Ident), (bool)$Value);
+                // Tessie: start_climate / stop_climate [5](https://developer.tessie.com/reference/start-climate)[6](https://developer.tessie.com/reference/stop-climate)
+                $on = (bool)$Value;
+                $this->sendCommand($vin, $token, $on ? 'start_climate' : 'stop_climate');
+                $this->safeSetValue(self::ACT_CLIMATE, $on);
                 break;
 
             case self::ACT_START_CHARGING:
-                $this->cmdSimple($vin, $token, ((bool)$Value) ? 'charge_start' : 'charge_stop');
-                SetValueBoolean($this->GetIDForIdent($Ident), (bool)$Value);
+                // Tessie: start_charging / stop_charging [7](https://developer.tessie.com/reference/start-charging)[8](https://developer.tessie.com/reference/stop-charging)
+                $on = (bool)$Value;
+                $this->sendCommand($vin, $token, $on ? 'start_charging' : 'stop_charging');
+                $this->safeSetValue(self::ACT_START_CHARGING, $on);
                 break;
 
             case self::ACT_CHARGE_LIMIT:
-                $limit = max(0, min(100, (int)$Value));
-                $this->cmdSimple($vin, $token, 'set_charge_limit', ['percent' => $limit]);
-                SetValueInteger($this->GetIDForIdent($Ident), $limit);
+                // Tessie supports "Set Charge Limit" (command name set_charge_limit) [18](https://developer.tessie.com/reference/quick-start)[2](https://adsoba-my.sharepoint.com/personal/d_gureth_adsoba_de/Documents/Microsoft%20Copilot%20Chat-Dateien/dump.txt)
+                $percent = (int)$Value;
+                if ($percent < 0) $percent = 0;
+                if ($percent > 100) $percent = 100;
+
+                // IMPORTANT: do NOT send empty JSON bodies; pass query param instead
+                $this->sendCommand($vin, $token, 'set_charge_limit', ['percent' => $percent]);
+                $this->safeSetValue(self::ACT_CHARGE_LIMIT, $percent);
                 break;
 
             case self::ACT_CHARGING_AMPS:
-                $amps = max(1, min(48, (int)$Value));
-                $this->cmdSimple($vin, $token, 'set_charging_amps', ['amps' => $amps]);
-                SetValueInteger($this->GetIDForIdent($Ident), $amps);
+                // Tessie: set_charging_amps requires amps parameter [11](https://developer.tessie.com/reference/set-charging-amps)
+                $amps = (int)$Value;
+                if ($amps < 0) $amps = 0;
+                if ($amps > 48) $amps = 48;
+
+                $this->sendCommand($vin, $token, 'set_charging_amps', ['amps' => $amps]);
+                $this->safeSetValue(self::ACT_CHARGING_AMPS, $amps);
                 break;
 
             case self::ACT_FLASH:
+                // Tessie: flash [9](https://developer.tessie.com/reference/flash-lights)
                 if ((bool)$Value) {
-                    $this->cmdSimple($vin, $token, 'flash_lights');
+                    $this->sendCommand($vin, $token, 'flash');
                 }
-                // Button-Reset
-                SetValueBoolean($this->GetIDForIdent($Ident), false);
+                // button reset
+                $this->safeSetValue(self::ACT_FLASH, false);
                 break;
 
             case self::ACT_HONK:
+                // Tessie: honk [10](https://developer.tessie.com/reference/honk)
                 if ((bool)$Value) {
-                    $this->cmdSimple($vin, $token, 'honk_horn');
+                    $this->sendCommand($vin, $token, 'honk');
                 }
-                // Button-Reset
-                SetValueBoolean($this->GetIDForIdent($Ident), false);
+                // button reset
+                $this->safeSetValue(self::ACT_HONK, false);
                 break;
 
             default:
-                throw new Exception('Unbekannte Aktion: ' . $Ident);
+                throw new Exception('Unbekannte Aktion: ' . (string)$Ident);
         }
     }
 
-    // ---------------- Action variables ----------------
+    // -------- Internal: command sending --------
+
+    /**
+     * Sends a Tessie command using:
+     * POST https://api.tessie.com/{vin}/command/{command}?wait_for_completion=true
+     * with optional query params (e.g. amps, percent). [3](https://developer.tessie.com/reference/lock)[5](https://developer.tessie.com/reference/start-climate)[7](https://developer.tessie.com/reference/start-charging)[9](https://developer.tessie.com/reference/flash-lights)[10](https://developer.tessie.com/reference/honk)[11](https://developer.tessie.com/reference/set-charging-amps)
+     */
+    private function sendCommand(string $vin, string $token, string $command, array $queryParams = []): void
+    {
+        if ((bool)$this->ReadPropertyBoolean('WakeBeforeCommands')) {
+            $this->ensureAwake($vin, $token);
+        }
+
+        $wait = (bool)$this->ReadPropertyBoolean('WaitForCompletion');
+        $params = $queryParams;
+
+        if ($wait) {
+            $params['wait_for_completion'] = 'true';
+        }
+
+        $path = '/' . rawurlencode($vin) . '/command/' . rawurlencode($command);
+        if (count($params) > 0) {
+            $path .= '?' . http_build_query($params, '', '&', PHP_QUERY_RFC3986);
+        }
+
+        // DO NOT send an empty JSON body. This caused HTTP 400 "parsing request parameters" in your logs. [2](https://adsoba-my.sharepoint.com/personal/d_gureth_adsoba_de/Documents/Microsoft%20Copilot%20Chat-Dateien/dump.txt)
+        $resp = $this->apiRequest($token, 'POST', $path, null);
+
+        $ok = (bool)($resp['result'] ?? ($resp['response']['result'] ?? false));
+        if (!$ok) {
+            $this->SendDebug('Command', 'Failed: ' . $command . ' ' . json_encode($resp), 0);
+        } else {
+            $this->SendDebug('Command', 'OK: ' . $command, 0);
+        }
+    }
+
+    /**
+     * Ensure vehicle is awake. Uses Tessie status and wake endpoints. [13](https://developer.tessie.com/reference/get-status)[12](https://developer.tessie.com/reference/wake)
+     */
+    private function ensureAwake(string $vin, string $token): void
+    {
+        $status = $this->getVehicleStatus($vin, $token);
+        if ($status === 'awake') {
+            return;
+        }
+
+        // Wake endpoint: POST /{vin}/wake returns result true when awake or false after timeout [12](https://developer.tessie.com/reference/wake)
+        $path = '/' . rawurlencode($vin) . '/wake';
+        $resp = $this->apiRequest($token, 'POST', $path, null);
+
+        $ok = (bool)($resp['result'] ?? false);
+        $this->SendDebug('Wake', 'result=' . json_encode($resp), 0);
+
+        // If wake failed, still try sending command; Tessie may handle retries server-side,
+        // but the user will see a meaningful error anyway.
+        (void)$ok;
+    }
+
+    private function getVehicleStatus(string $vin, string $token): string
+    {
+        // Tessie: GET /{vin}/status -> { "status": "asleep|waiting_for_sleep|awake" } [13](https://developer.tessie.com/reference/get-status)
+        $path = '/' . rawurlencode($vin) . '/status';
+        $resp = $this->apiRequest($token, 'GET', $path, null);
+        $st = $resp['status'] ?? '';
+        return is_string($st) ? $st : '';
+    }
+
+    // -------- Telemetry -> update action variables --------
+
+    private function syncActionVarsFromTelemetry(array $dataItems): void
+    {
+        // Telemetry data format is documented by Tessie: array of {key, value} [14](https://developer.tessie.com/reference/access-tesla-fleet-telemetry)[2](https://adsoba-my.sharepoint.com/personal/d_gureth_adsoba_de/Documents/Microsoft%20Copilot%20Chat-Dateien/dump.txt)
+        $locked = null;
+        $limit  = null;
+        $amps   = null;
+
+        foreach ($dataItems as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            $key = (string)($item['key'] ?? '');
+            $val = $item['value'] ?? null;
+            if (!is_array($val) || $key === '') {
+                continue;
+            }
+
+            if ($key === 'Locked' && array_key_exists('booleanValue', $val)) {
+                $locked = (bool)$val['booleanValue'];
+            } elseif ($key === 'ChargeLimitSoc' && array_key_exists('intValue', $val)) {
+                $limit = (int)$val['intValue'];
+            } elseif ($key === 'ChargeCurrentRequest' && array_key_exists('intValue', $val)) {
+                $amps = (int)$val['intValue'];
+            }
+        }
+
+        if ($locked !== null) {
+            $this->safeSetValue(self::ACT_LOCKED, $locked);
+        }
+        if ($limit !== null) {
+            $this->safeSetValue(self::ACT_CHARGE_LIMIT, $limit);
+        }
+        if ($amps !== null) {
+            $this->safeSetValue(self::ACT_CHARGING_AMPS, $amps);
+        }
+    }
+
+    private function safeSetValue(string $ident, $value): void
+    {
+        $id = @IPS_GetObjectIDByIdent($ident, $this->InstanceID);
+        if ($id <= 0) {
+            return;
+        }
+        $type = IPS_GetVariable($id)['VariableType'] ?? null;
+        if ($type === VARIABLETYPE_BOOLEAN) {
+            @SetValueBoolean($id, (bool)$value);
+        } elseif ($type === VARIABLETYPE_INTEGER) {
+            @SetValueInteger($id, (int)$value);
+        } elseif ($type === VARIABLETYPE_FLOAT) {
+            @SetValueFloat($id, (float)$value);
+        } else {
+            @SetValueString($id, (string)$value);
+        }
+    }
+
+    // -------- Action variables + links --------
 
     private function ensureActionVariables(): void
     {
         $catId = $this->ensureCategory('Aktionen');
 
         $this->MaintainVariable(self::ACT_LOCKED, 'Verriegelt', VARIABLETYPE_BOOLEAN, '~Lock', 0, true);
-        $id = $this->GetIDForIdent(self::ACT_LOCKED);
         $this->EnableAction(self::ACT_LOCKED);
-        $this->ensureLink($catId, $id, 'action.locked', 'Verriegelt');
+        $this->ensureLink($catId, $this->GetIDForIdent(self::ACT_LOCKED), 'action.locked', 'Verriegelt');
 
         $this->MaintainVariable(self::ACT_CLIMATE, 'Klima', VARIABLETYPE_BOOLEAN, '~Switch', 0, true);
-        $id = $this->GetIDForIdent(self::ACT_CLIMATE);
         $this->EnableAction(self::ACT_CLIMATE);
-        $this->ensureLink($catId, $id, 'action.climate', 'Klima');
+        $this->ensureLink($catId, $this->GetIDForIdent(self::ACT_CLIMATE), 'action.climate', 'Klima');
 
         $this->MaintainVariable(self::ACT_START_CHARGING, 'Laden', VARIABLETYPE_BOOLEAN, '~Switch', 0, true);
-        $id = $this->GetIDForIdent(self::ACT_START_CHARGING);
         $this->EnableAction(self::ACT_START_CHARGING);
-        $this->ensureLink($catId, $id, 'action.charging', 'Laden');
+        $this->ensureLink($catId, $this->GetIDForIdent(self::ACT_START_CHARGING), 'action.charging', 'Laden');
 
         $this->MaintainVariable(self::ACT_CHARGE_LIMIT, 'Ladelimit (%)', VARIABLETYPE_INTEGER, 'Tessie.PercentInt', 0, true);
-        $id = $this->GetIDForIdent(self::ACT_CHARGE_LIMIT);
         $this->EnableAction(self::ACT_CHARGE_LIMIT);
-        $this->ensureLink($catId, $id, 'action.charge_limit', 'Ladelimit (%)');
+        $this->ensureLink($catId, $this->GetIDForIdent(self::ACT_CHARGE_LIMIT), 'action.charge_limit', 'Ladelimit (%)');
 
         $this->MaintainVariable(self::ACT_CHARGING_AMPS, 'Ladestrom (A)', VARIABLETYPE_INTEGER, 'Tessie.Amps', 0, true);
-        $id = $this->GetIDForIdent(self::ACT_CHARGING_AMPS);
         $this->EnableAction(self::ACT_CHARGING_AMPS);
-        $this->ensureLink($catId, $id, 'action.charging_amps', 'Ladestrom (A)');
+        $this->ensureLink($catId, $this->GetIDForIdent(self::ACT_CHARGING_AMPS), 'action.charging_amps', 'Ladestrom (A)');
 
-        // "Button" als Boolean + Reset
+        // Button: flash (reset after press)
         $this->MaintainVariable(self::ACT_FLASH, 'Licht blinken', VARIABLETYPE_BOOLEAN, '~Switch', 0, true);
-        $id = $this->GetIDForIdent(self::ACT_FLASH);
         $this->EnableAction(self::ACT_FLASH);
-        $this->ensureLink($catId, $id, 'action.flash', 'Licht blinken');
+        $this->ensureLink($catId, $this->GetIDForIdent(self::ACT_FLASH), 'action.flash', 'Licht blinken');
 
+        // Button: honk (reset after press)
         $this->MaintainVariable(self::ACT_HONK, 'Hupe', VARIABLETYPE_BOOLEAN, '~Switch', 0, true);
-        $id = $this->GetIDForIdent(self::ACT_HONK);
         $this->EnableAction(self::ACT_HONK);
-        $this->ensureLink($catId, $id, 'action.honk', 'Hupe');
+        $this->ensureLink($catId, $this->GetIDForIdent(self::ACT_HONK), 'action.honk', 'Hupe');
     }
 
-    private function syncActionVarsFromRest(array $payload): void
-    {
-        // defensive: set only if fields exist
-        try {
-            if (isset($payload['response']) && is_array($payload['response'])) {
-                $payload = $payload['response'];
-            }
-
-            // Vehicle locked state
-            $locked = $payload['vehicle_state']['locked'] ?? null;
-            if (is_bool($locked) && $this->variableExistsByIdent(self::ACT_LOCKED)) {
-                SetValueBoolean($this->GetIDForIdent(self::ACT_LOCKED), $locked);
-            }
-
-            // Charging state
-            $charging = $payload['charge_state']['charging_state'] ?? null;
-            if (is_string($charging) && $this->variableExistsByIdent(self::ACT_START_CHARGING)) {
-                $isCharging = in_array(strtolower($charging), ['charging', 'starting'], true);
-                SetValueBoolean($this->GetIDForIdent(self::ACT_START_CHARGING), $isCharging);
-            }
-
-            // Charge limit
-            $limit = $payload['charge_state']['charge_limit_soc'] ?? null;
-            if (is_numeric($limit) && $this->variableExistsByIdent(self::ACT_CHARGE_LIMIT)) {
-                SetValueInteger($this->GetIDForIdent(self::ACT_CHARGE_LIMIT), (int)$limit);
-            }
-
-            // Charging amps
-            $amps = $payload['charge_state']['charge_current_request'] ?? null;
-            if (is_numeric($amps) && $this->variableExistsByIdent(self::ACT_CHARGING_AMPS)) {
-                SetValueInteger($this->GetIDForIdent(self::ACT_CHARGING_AMPS), (int)$amps);
-            }
-        } catch (Throwable $e) {
-            // never break Update
-            $this->SendDebug('syncActionVarsFromRest', $e->getMessage(), 0);
-        }
-    }
-
-    private function variableExistsByIdent(string $ident): bool
-    {
-        return @IPS_GetObjectIDByIdent($ident, $this->InstanceID) > 0;
-    }
-
-    // ---------------- Profiles ----------------
+    // -------- Profiles --------
 
     private function ensureProfiles(): void
     {
+        // Percent profile
         if (!IPS_VariableProfileExists('Tessie.PercentInt')) {
-            IPS_CreateVariableProfile('Tessie.PercentInt', 1);
+            IPS_CreateVariableProfile('Tessie.PercentInt', VARIABLETYPE_INTEGER);
             IPS_SetVariableProfileText('Tessie.PercentInt', '', ' %');
             IPS_SetVariableProfileValues('Tessie.PercentInt', 0, 100, 1);
             IPS_SetVariableProfileDigits('Tessie.PercentInt', 0);
             IPS_SetVariableProfileIcon('Tessie.PercentInt', 'Intensity');
         }
 
+        // Amps profile
         if (!IPS_VariableProfileExists('Tessie.Amps')) {
-            IPS_CreateVariableProfile('Tessie.Amps', 1);
+            IPS_CreateVariableProfile('Tessie.Amps', VARIABLETYPE_INTEGER);
             IPS_SetVariableProfileText('Tessie.Amps', '', ' A');
             IPS_SetVariableProfileValues('Tessie.Amps', 0, 48, 1);
             IPS_SetVariableProfileDigits('Tessie.Amps', 0);
@@ -252,11 +387,11 @@ class TessieVehicle extends IPSModule
         }
     }
 
-    // ---------------- Links / Categories ----------------
+    // -------- Category/Link helpers --------
 
     private function ensureCategory(string $name): int
     {
-        $ident = $this->makeCategoryIdent($name);
+        $ident = 'CAT_' . $this->makeIdent($name);
         $id = @IPS_GetObjectIDByIdent($ident, $this->InstanceID);
         if ($id <= 0) {
             $id = IPS_CreateCategory();
@@ -267,18 +402,9 @@ class TessieVehicle extends IPSModule
         return $id;
     }
 
-    private function makeCategoryIdent(string $name): string
-    {
-        $base = preg_replace('/[^A-Za-z0-9]/', '_', $name);
-        $base = preg_replace('/_+/', '_', (string)$base);
-        $base = trim((string)$base, '_');
-        $hash = substr(md5($name), 0, 8);
-        $ident = 'CAT_' . substr($base, 0, max(1, 64 - 4 - 1 - 8)) . '_' . $hash;
-        return $ident;
-    }
-
     private function ensureLink(int $catId, $targetId, string $fullKey, string $label): void
     {
+        // Guard against invalid ids
         if (!is_int($targetId) || $targetId <= 0 || !IPS_ObjectExists($targetId)) {
             return;
         }
@@ -298,51 +424,34 @@ class TessieVehicle extends IPSModule
     {
         $s = preg_replace('/[^a-zA-Z0-9_]/', '_', $s);
         $s = preg_replace('/_+/', '_', (string)$s);
-        return substr((string)$s, 0, 64);
-    }
-
-    // ---------------- Commands / HTTP ----------------
-
-    private function cmdSimple(string $command, ?array $body = null): void
-    {
-        $path = $this->buildVehiclePath($vin, '/command/' . rawurlencode($command)) . '?wait_for_completion=true';
-        if ($body !== null && count($body) === 0) {
-        $body = null; // KEIN "[]"-Body senden!
-        $resp = $this->apiRequest($token, 'POST', $path, $body);
-
-        $ok = (bool)($resp['result'] ?? ($resp['response']['result'] ?? false));
-        if (!$ok) {
-            $this->SendDebug('Command', 'Failed: ' . $command . ' ' . json_encode($resp), 0);
+        $s = trim((string)$s, '_');
+        if ($s === '') {
+            $s = 'X';
         }
+        return substr($s, 0, 64);
     }
 
-    private function buildVehiclePath(string $vin, string $suffix): string
+    // -------- HTTP (Tessie API) --------
+
+    /**
+     * Generic request against ApiBase (default https://api.tessie.com). [16](https://developer.tessie.com/reference/authentication)[15](https://developer.tessie.com/reference/access-tesla-fleet-api)
+     * IMPORTANT: if $body is null or empty, do NOT send a JSON body.
+     * Sending [] caused HTTP 400 parsing errors in your logs. [2](https://adsoba-my.sharepoint.com/personal/d_gureth_adsoba_de/Documents/Microsoft%20Copilot%20Chat-Dateien/dump.txt)
+     */
+    private function apiRequest(string $token, string $method, string $path, $body): array
     {
         $base = rtrim(trim($this->ReadPropertyString('ApiBase')), '/');
 
-        // If user set base already to .../api/1/vehicles, don't duplicate
-        if (preg_match('#/api/1/vehicles$#', $base)) {
-            return '/api/1/vehicles/' . rawurlencode($vin) . $suffix;
-        }
-
-        // Normal default
-        return '/api/1/vehicles/' . rawurlencode($vin) . $suffix;
-    }
-
-    private function apiRequest(string $token, string $method, string $path, array $body = null): array
-    {
-        $base = rtrim(trim($this->ReadPropertyString('ApiBase')), '/');
-
-        // Ensure leading slash
         if ($path === '' || $path[0] !== '/') {
             $path = '/' . $path;
         }
+
         $url = $base . $path;
 
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, $url);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
+        curl_setopt($ch, CURLOPT_CUSTOMREQUEST, strtoupper($method));
         curl_setopt($ch, CURLOPT_TIMEOUT, 30);
         curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
 
@@ -351,12 +460,18 @@ class TessieVehicle extends IPSModule
             'Authorization: Bearer ' . $token
         ];
 
-        
-        if ($body !== null && !(is_array($body) && count($body) === 0)) {
+        // Only attach a body if it's non-empty (avoid [] which broke commands) [2](https://adsoba-my.sharepoint.com/personal/d_gureth_adsoba_de/Documents/Microsoft%20Copilot%20Chat-Dateien/dump.txt)
+        $sendBody = true;
+        if ($body === null) {
+            $sendBody = false;
+        } elseif (is_array($body) && count($body) === 0) {
+            $sendBody = false;
+        }
+
+        if ($sendBody) {
             $jsonBody = json_encode($body);
             curl_setopt($ch, CURLOPT_POSTFIELDS, $jsonBody);
             $headers[] = 'Content-Type: application/json';
-
         }
 
         curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
@@ -376,6 +491,7 @@ class TessieVehicle extends IPSModule
             $this->SendDebug('ApiRequest', 'HTTP ' . $code . ' non-JSON: ' . substr($resp, 0, 500), 0);
             return [];
         }
+
         return $json;
     }
 }
