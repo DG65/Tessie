@@ -303,9 +303,11 @@ class TessieVehicle extends IPSModule
 
     // ---------------- Commands / HTTP ----------------
 
-    private function cmdSimple(string $vin, string $token, string $command, array $body = []): void
+    private function cmdSimple(string $command, ?array $body = null): void
     {
         $path = $this->buildVehiclePath($vin, '/command/' . rawurlencode($command)) . '?wait_for_completion=true';
+        if ($body !== null && count($body) === 0) {
+        $body = null; // KEIN "[]"-Body senden!
         $resp = $this->apiRequest($token, 'POST', $path, $body);
 
         $ok = (bool)($resp['result'] ?? ($resp['response']['result'] ?? false));
