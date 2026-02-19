@@ -87,7 +87,7 @@ class TessieVehicle extends IPSModule
     /**
      * Wird von Symcon aufgerufen, wenn in der Visualisierung auf eine EnableAction-Variable geklickt wird. [2](https://github.com/demel42/IPSymconBuderusKM200)
      */
-    public function RequestAction(string $Ident, $Value): void
+    public function RequestAction($Ident, $Value)
     {
         $token = trim($this->ReadPropertyString('ApiToken'));
         $vin   = trim($this->ReadPropertyString('VIN'));
