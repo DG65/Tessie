@@ -351,10 +351,12 @@ class TessieVehicle extends IPSModule
             'Authorization: Bearer ' . $token
         ];
 
-        if ($body !== null) {
+        
+        if ($body !== null && !(is_array($body) && count($body) === 0)) {
             $jsonBody = json_encode($body);
             curl_setopt($ch, CURLOPT_POSTFIELDS, $jsonBody);
             $headers[] = 'Content-Type: application/json';
+
         }
 
         curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
