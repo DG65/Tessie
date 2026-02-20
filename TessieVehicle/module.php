@@ -461,17 +461,23 @@ class TessieVehicle extends IPSModule
         ];
 
         // Only attach a body if it's non-empty (avoid [] which broke commands) [2](https://adsoba-my.sharepoint.com/personal/d_gureth_adsoba_de/Documents/Microsoft%20Copilot%20Chat-Dateien/dump.txt)
-        $sendBody = true;
-        if ($body === null) {
-            $sendBody = false;
-        } elseif (is_array($body) && count($body) === 0) {
-            $sendBody = false;
-        }
+        $methodUpper = strtoupper($method);
 
-        if ($sendBody) {
+        $hasJsonBody = !($body === null || (is_array($body) && count($body) === 0));
+
+        if ($hasJsonBody) {
+            // Normaler JSON-Body
             $jsonBody = json_encode($body);
             curl_setopt($ch, CURLOPT_POSTFIELDS, $jsonBody);
             $headers[] = 'Content-Type: application/json';
+        } else {
+            // WICHTIG: Für POST ohne Payload trotzdem einen leeren Body senden,
+            // damit cURL Content-Length: 0 setzt und kein HTTP 411 entsteht.
+            if ($methodUpper === 'POST') {
+                curl_setopt($ch, CURLOPT_POSTFIELDS, '');
+                // Content-Length wird i.d.R. automatisch gesetzt, aber explizit schadet nicht:
+                $headers[] = 'Content-Length: 0';
+            }
         }
 
         curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
