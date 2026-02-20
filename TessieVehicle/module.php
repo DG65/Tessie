@@ -3,49 +3,63 @@ declare(strict_types=1);
 
 class TessieVehicle extends IPSModule
 {
-    // -------- Variable Idents (Actions) --------
-    private const ACT_LOCKED         = 'act_locked';
-    private const ACT_CLIMATE        = 'act_climate';
-    private const ACT_START_CHARGING = 'act_charging';
-    private const ACT_CHARGE_LIMIT   = 'act_charge_limit';
+    // -------------------- Variable Idents (Actions) --------------------
+    private const ACT_LOCKED                = 'act_locked';
+    private const ACT_CLIMATE               = 'act_climate';
+    private const ACT_START_CHARGING        = 'act_charging';
+    private const ACT_CHARGE_LIMIT          = 'act_charge_limit';
 
-    // Action variable = gewünschter Ladestrom (Sollwert) -> wird via set_charging_amps gesetzt
+    // Action variable = gewünschter Ladestrom (Sollwert)
     private const ACT_CHARGING_AMPS_REQUEST = 'act_charging_amps';
 
-    private const ACT_FLASH          = 'act_flash';
-    private const ACT_HONK           = 'act_honk';
+    private const ACT_FLASH                 = 'act_flash';
+    private const ACT_HONK                  = 'act_honk';
 
-    // -------- Variable Idents (Status) --------
-    // Statuswerte aus Telemetrie (nur Anzeige)
-    private const STAT_CHARGING_AMPS_ACTUAL = 'stat_charge_amps_actual';  // ChargeAmps (Ist)
-    private const STAT_CHARGING_AMPS_MAX    = 'stat_charge_amps_max';     // ChargeCurrentRequestMax
-    private const STAT_AC_CHARGING_POWER    = 'stat_ac_charging_power';   // ACChargingPower
+    // -------------------- Variable Idents (Status) --------------------
+    private const STAT_CHARGING_AMPS_ACTUAL = 'stat_charge_amps_actual';   // ChargeAmps (Ist)
+    private const STAT_CHARGING_AMPS_MAX    = 'stat_charge_amps_max';      // ChargeCurrentRequestMax
+    private const STAT_AC_CHARGING_POWER    = 'stat_ac_charging_power';    // ACChargingPower
 
-    // -------- Timers --------
+    // -------------------- Timers --------------------
     private const TIMER_UPDATE = 'UpdateTimer';
 
-    // -------- Properties --------
+    // -------------------- Purpose categories (Links) --------------------
+    private const PURPOSE_ACTIONS  = 'Aktionen';
+    private const PURPOSE_STATUS   = 'Status';
+    private const PURPOSE_CHARGING = 'Laden';
+    private const PURPOSE_CLIMATE  = 'Klima';
+    private const PURPOSE_SECURITY = 'Sicherheit';
+
+    // -------------------- Attributes --------------------
+    private const ATTR_VEHICLE_NAME = 'VehicleName';
+
     public function Create()
     {
         parent::Create();
 
+        // API
         $this->RegisterPropertyString('ApiToken', '');
         $this->RegisterPropertyString('VIN', '');
         $this->RegisterPropertyString('ApiBase', 'https://api.tessie.com');
 
+        // Behavior
         $this->RegisterPropertyInteger('UpdateInterval', 300);     // seconds
         $this->RegisterPropertyBoolean('TelemetryEnabled', true);
-
-        // If enabled: try to wake vehicle before sending commands
         $this->RegisterPropertyBoolean('WakeBeforeCommands', true);
-
-        // Wait for completion query flag
         $this->RegisterPropertyBoolean('WaitForCompletion', true);
-
-        // Debug HTTP Requests
         $this->RegisterPropertyBoolean('DebugHTTP', false);
 
+        // Object tree placement
+        // Where the instance should be placed (Parent category). 0 => do not move.
+        $this->RegisterPropertyInteger('InstanceLocation', 0);
+
+        // Links: Root parent category for link tree. 0 => do not create links.
+        $this->RegisterPropertyInteger('LinksLocation', 0);
+        $this->RegisterPropertyBoolean('CreateLinks', true);
+
+        // Internal
         $this->RegisterTimer(self::TIMER_UPDATE, 0, 'TESSIE_Update($_IPS["TARGET"]);');
+        $this->RegisterAttributeString(self::ATTR_VEHICLE_NAME, '');
     }
 
     public function ApplyChanges()
@@ -59,14 +73,30 @@ class TessieVehicle extends IPSModule
         }
         $this->SetTimerInterval(self::TIMER_UPDATE, $interval > 0 ? $interval * 1000 : 0);
 
-        // Profiles must exist before MaintainVariable uses them
+        // Move instance if configured
+        $instanceParent = (int)$this->ReadPropertyInteger('InstanceLocation');
+        if ($instanceParent > 0 && IPS_ObjectExists($instanceParent)) {
+            $currentParent = IPS_GetParent($this->InstanceID);
+            if ($currentParent !== $instanceParent) {
+                IPS_SetParent($this->InstanceID, $instanceParent);
+            }
+        }
+
+        // Profiles
         $this->ensureProfiles();
 
-        // Create variables + links
+        // Variables
         try {
             $this->ensureVariables();
         } catch (Throwable $e) {
             $this->LogMessage('ensureVariables failed: ' . $e->getMessage(), KL_WARNING);
+        }
+
+        // Links
+        try {
+            $this->ensureLinkTree();
+        } catch (Throwable $e) {
+            $this->LogMessage('ensureLinkTree failed: ' . $e->getMessage(), KL_WARNING);
         }
 
         $this->SetStatus(102);
@@ -111,10 +141,8 @@ class TessieVehicle extends IPSModule
             return;
         }
 
-        // Log raw (useful for debugging)
         $this->SendDebug('Telemetry', $buf, 0);
 
-        // Handle errors packets and connection status packets
         if (isset($payload['errors'])) {
             $this->SendDebug('TelemetryErrors', json_encode($payload['errors']), 0);
             return;
@@ -124,7 +152,6 @@ class TessieVehicle extends IPSModule
             return;
         }
 
-        // Data packets: { data: [ {key, value}, ... ], createdAt, vin, isResend }
         if (!isset($payload['data']) || !is_array($payload['data'])) {
             return;
         }
@@ -167,19 +194,16 @@ class TessieVehicle extends IPSModule
                 if ($percent < 0) $percent = 0;
                 if ($percent > 100) $percent = 100;
 
-                // Tessie command: set_charge_limit expects percent
                 $this->sendCommand($vin, $token, 'set_charge_limit', ['percent' => $percent]);
                 $this->safeSetValue(self::ACT_CHARGE_LIMIT, $percent);
                 break;
 
             case self::ACT_CHARGING_AMPS_REQUEST:
-                // Tessie command: set_charging_amps expects amps
                 $amps = (int)$Value;
                 if ($amps < 0) $amps = 0;
                 if ($amps > 48) $amps = 48;
 
                 $this->sendCommand($vin, $token, 'set_charging_amps', ['amps' => $amps]);
-                // Anzeige sofort setzen (Telemetrie gleicht nach)
                 $this->safeSetValue(self::ACT_CHARGING_AMPS_REQUEST, $amps);
                 break;
 
@@ -260,6 +284,7 @@ class TessieVehicle extends IPSModule
         $act = null;  // ChargeAmps (Ist)
         $max = null;  // ChargeCurrentRequestMax
         $acp = null;  // ACChargingPower
+        $vehicleName = null; // VehicleName
 
         foreach ($dataItems as $item) {
             if (!is_array($item)) {
@@ -288,6 +313,9 @@ class TessieVehicle extends IPSModule
 
             } elseif ($key === 'ACChargingPower' && array_key_exists('doubleValue', $val)) {
                 $acp = (float)$val['doubleValue'];
+
+            } elseif ($key === 'VehicleName' && array_key_exists('stringValue', $val)) {
+                $vehicleName = (string)$val['stringValue'];
             }
         }
 
@@ -298,7 +326,6 @@ class TessieVehicle extends IPSModule
             $this->safeSetValue(self::ACT_CHARGE_LIMIT, $limit);
         }
         if ($req !== null) {
-            // Action-Variable zeigt den SOLL-Wert
             $this->safeSetValue(self::ACT_CHARGING_AMPS_REQUEST, $req);
         }
         if ($act !== null) {
@@ -309,6 +336,15 @@ class TessieVehicle extends IPSModule
         }
         if ($acp !== null) {
             $this->safeSetValue(self::STAT_AC_CHARGING_POWER, $acp);
+        }
+
+        if ($vehicleName !== null && trim($vehicleName) !== '') {
+            $old = $this->ReadAttributeString(self::ATTR_VEHICLE_NAME);
+            if ($old !== $vehicleName) {
+                $this->WriteAttributeString(self::ATTR_VEHICLE_NAME, $vehicleName);
+                // Rename link root category on next ApplyChanges cycle (or now)
+                $this->ensureLinkTree(true);
+            }
         }
     }
 
@@ -331,56 +367,39 @@ class TessieVehicle extends IPSModule
         }
     }
 
-    // -------- Variables, profiles, links --------
+    // -------- Variables & profiles --------
     private function ensureVariables(): void
     {
-        $catActions = $this->ensureCategory('Aktionen');
-        $catStatus  = $this->ensureCategory('Status');
-
         // Actions
         $this->MaintainVariable(self::ACT_LOCKED, 'Verriegelt', VARIABLETYPE_BOOLEAN, '~Lock', 0, true);
         $this->EnableAction(self::ACT_LOCKED);
-        $this->ensureLink($catActions, $this->GetIDForIdent(self::ACT_LOCKED), 'action.locked', 'Verriegelt');
 
         $this->MaintainVariable(self::ACT_CLIMATE, 'Klima', VARIABLETYPE_BOOLEAN, '~Switch', 0, true);
         $this->EnableAction(self::ACT_CLIMATE);
-        $this->ensureLink($catActions, $this->GetIDForIdent(self::ACT_CLIMATE), 'action.climate', 'Klima');
 
         $this->MaintainVariable(self::ACT_START_CHARGING, 'Laden', VARIABLETYPE_BOOLEAN, '~Switch', 0, true);
         $this->EnableAction(self::ACT_START_CHARGING);
-        $this->ensureLink($catActions, $this->GetIDForIdent(self::ACT_START_CHARGING), 'action.charging', 'Laden');
 
         $this->MaintainVariable(self::ACT_CHARGE_LIMIT, 'Ladelimit (%)', VARIABLETYPE_INTEGER, 'Tessie.PercentInt', 0, true);
         $this->EnableAction(self::ACT_CHARGE_LIMIT);
-        $this->ensureLink($catActions, $this->GetIDForIdent(self::ACT_CHARGE_LIMIT), 'action.charge_limit', 'Ladelimit (%)');
 
-        // Action variable (Sollwert) – bewusst so benannt
         $this->MaintainVariable(self::ACT_CHARGING_AMPS_REQUEST, 'Ladestrom Soll (A)', VARIABLETYPE_INTEGER, 'Tessie.Amps', 0, true);
         $this->EnableAction(self::ACT_CHARGING_AMPS_REQUEST);
-        $this->ensureLink($catActions, $this->GetIDForIdent(self::ACT_CHARGING_AMPS_REQUEST), 'action.charging_amps_request', 'Ladestrom Soll (A)');
 
         $this->MaintainVariable(self::ACT_FLASH, 'Licht blinken', VARIABLETYPE_BOOLEAN, '~Switch', 0, true);
         $this->EnableAction(self::ACT_FLASH);
-        $this->ensureLink($catActions, $this->GetIDForIdent(self::ACT_FLASH), 'action.flash', 'Licht blinken');
 
         $this->MaintainVariable(self::ACT_HONK, 'Hupe', VARIABLETYPE_BOOLEAN, '~Switch', 0, true);
         $this->EnableAction(self::ACT_HONK);
-        $this->ensureLink($catActions, $this->GetIDForIdent(self::ACT_HONK), 'action.honk', 'Hupe');
 
-        // Status variables (no action)
+        // Status
         $this->MaintainVariable(self::STAT_CHARGING_AMPS_ACTUAL, 'Ladestrom Ist (A)', VARIABLETYPE_FLOAT, 'Tessie.AmpsFloat', 0, true);
-        $this->ensureLink($catStatus, $this->GetIDForIdent(self::STAT_CHARGING_AMPS_ACTUAL), 'status.charging_amps_actual', 'Ladestrom Ist (A)');
-
         $this->MaintainVariable(self::STAT_CHARGING_AMPS_MAX, 'Ladestrom Max (A)', VARIABLETYPE_INTEGER, 'Tessie.Amps', 0, true);
-        $this->ensureLink($catStatus, $this->GetIDForIdent(self::STAT_CHARGING_AMPS_MAX), 'status.charging_amps_max', 'Ladestrom Max (A)');
-
         $this->MaintainVariable(self::STAT_AC_CHARGING_POWER, 'AC Ladeleistung (kW)', VARIABLETYPE_FLOAT, 'Tessie.kW', 0, true);
-        $this->ensureLink($catStatus, $this->GetIDForIdent(self::STAT_AC_CHARGING_POWER), 'status.ac_charging_power', 'AC Ladeleistung (kW)');
     }
 
     private function ensureProfiles(): void
     {
-        // Percent profile
         if (!IPS_VariableProfileExists('Tessie.PercentInt')) {
             IPS_CreateVariableProfile('Tessie.PercentInt', VARIABLETYPE_INTEGER);
             IPS_SetVariableProfileText('Tessie.PercentInt', '', ' %');
@@ -389,7 +408,6 @@ class TessieVehicle extends IPSModule
             IPS_SetVariableProfileIcon('Tessie.PercentInt', 'Intensity');
         }
 
-        // Amps integer profile
         if (!IPS_VariableProfileExists('Tessie.Amps')) {
             IPS_CreateVariableProfile('Tessie.Amps', VARIABLETYPE_INTEGER);
             IPS_SetVariableProfileText('Tessie.Amps', '', ' A');
@@ -398,7 +416,6 @@ class TessieVehicle extends IPSModule
             IPS_SetVariableProfileIcon('Tessie.Amps', 'Electricity');
         }
 
-        // Amps float profile (Istwert)
         if (!IPS_VariableProfileExists('Tessie.AmpsFloat')) {
             IPS_CreateVariableProfile('Tessie.AmpsFloat', VARIABLETYPE_FLOAT);
             IPS_SetVariableProfileText('Tessie.AmpsFloat', '', ' A');
@@ -407,7 +424,6 @@ class TessieVehicle extends IPSModule
             IPS_SetVariableProfileIcon('Tessie.AmpsFloat', 'Electricity');
         }
 
-        // kW float profile
         if (!IPS_VariableProfileExists('Tessie.kW')) {
             IPS_CreateVariableProfile('Tessie.kW', VARIABLETYPE_FLOAT);
             IPS_SetVariableProfileText('Tessie.kW', '', ' kW');
@@ -417,34 +433,135 @@ class TessieVehicle extends IPSModule
         }
     }
 
-    private function ensureCategory(string $name): int
+    // -------- Link tree (overview) --------
+    private function ensureLinkTree(bool $forceRename = false): void
     {
-        $ident = 'CAT_' . $this->makeIdent($name);
-        $id = @IPS_GetObjectIDByIdent($ident, $this->InstanceID);
+        if (!(bool)$this->ReadPropertyBoolean('CreateLinks')) {
+            return;
+        }
+
+        $linksParent = (int)$this->ReadPropertyInteger('LinksLocation');
+        if ($linksParent <= 0 || !IPS_ObjectExists($linksParent)) {
+            return;
+        }
+
+        // Root category name = vehicle name (preferred) else instance name
+        $vehicleName = trim($this->ReadAttributeString(self::ATTR_VEHICLE_NAME));
+        $rootName = $vehicleName !== '' ? $vehicleName : IPS_GetName($this->InstanceID);
+
+        // Create/find root category by stable ident (unique per instance)
+        $rootIdent = 'TESSIE_LINKROOT_' . $this->InstanceID;
+        $rootId = @IPS_GetObjectIDByIdent($rootIdent, $linksParent);
+        if ($rootId <= 0) {
+            $rootId = IPS_CreateCategory();
+            IPS_SetParent($rootId, $linksParent);
+            IPS_SetIdent($rootId, $rootIdent);
+        }
+        if ($forceRename || IPS_GetName($rootId) !== $rootName) {
+            IPS_SetName($rootId, $rootName);
+        }
+
+        // Purpose sub categories under root
+        $purposes = [
+            self::PURPOSE_ACTIONS,
+            self::PURPOSE_STATUS,
+            self::PURPOSE_CHARGING,
+            self::PURPOSE_CLIMATE,
+            self::PURPOSE_SECURITY
+        ];
+
+        $purposeIds = [];
+        foreach ($purposes as $p) {
+            $pid = $this->ensureCategoryUnder($rootId, $p, 'PURP_' . $this->makeIdent($p));
+            $purposeIds[$p] = $pid;
+        }
+
+        // Build link sets
+        $actionVars = [
+            self::ACT_LOCKED,
+            self::ACT_CLIMATE,
+            self::ACT_START_CHARGING,
+            self::ACT_CHARGE_LIMIT,
+            self::ACT_CHARGING_AMPS_REQUEST,
+            self::ACT_FLASH,
+            self::ACT_HONK
+        ];
+
+        $statusVars = [
+            self::STAT_CHARGING_AMPS_ACTUAL,
+            self::STAT_CHARGING_AMPS_MAX,
+            self::STAT_AC_CHARGING_POWER
+        ];
+
+        // Domain mappings (variables -> purpose)
+        $domainMap = [
+            // Laden
+            self::ACT_START_CHARGING        => self::PURPOSE_CHARGING,
+            self::ACT_CHARGE_LIMIT          => self::PURPOSE_CHARGING,
+            self::ACT_CHARGING_AMPS_REQUEST => self::PURPOSE_CHARGING,
+            self::STAT_CHARGING_AMPS_ACTUAL => self::PURPOSE_CHARGING,
+            self::STAT_CHARGING_AMPS_MAX    => self::PURPOSE_CHARGING,
+            self::STAT_AC_CHARGING_POWER    => self::PURPOSE_CHARGING,
+
+            // Klima
+            self::ACT_CLIMATE               => self::PURPOSE_CLIMATE,
+
+            // Sicherheit
+            self::ACT_LOCKED                => self::PURPOSE_SECURITY,
+            self::ACT_FLASH                 => self::PURPOSE_SECURITY,
+            self::ACT_HONK                  => self::PURPOSE_SECURITY,
+        ];
+
+        // Create links in Actions / Status overview categories
+        foreach ($actionVars as $ident) {
+            $varId = @IPS_GetObjectIDByIdent($ident, $this->InstanceID);
+            if ($varId > 0) {
+                $this->ensureLinkUnder($purposeIds[self::PURPOSE_ACTIONS], $varId, 'LNK_ACT_' . $ident, IPS_GetName($varId));
+            }
+        }
+        foreach ($statusVars as $ident) {
+            $varId = @IPS_GetObjectIDByIdent($ident, $this->InstanceID);
+            if ($varId > 0) {
+                $this->ensureLinkUnder($purposeIds[self::PURPOSE_STATUS], $varId, 'LNK_STAT_' . $ident, IPS_GetName($varId));
+            }
+        }
+
+        // Create links in domain categories
+        foreach ($domainMap as $ident => $purposeName) {
+            $varId = @IPS_GetObjectIDByIdent($ident, $this->InstanceID);
+            if ($varId > 0) {
+                $this->ensureLinkUnder($purposeIds[$purposeName], $varId, 'LNK_DOM_' . $purposeName . '_' . $ident, IPS_GetName($varId));
+            }
+        }
+    }
+
+    private function ensureCategoryUnder(int $parentId, string $name, string $ident): int
+    {
+        $id = @IPS_GetObjectIDByIdent($ident, $parentId);
         if ($id <= 0) {
             $id = IPS_CreateCategory();
-            IPS_SetParent($id, $this->InstanceID);
+            IPS_SetParent($id, $parentId);
             IPS_SetIdent($id, $ident);
+        }
+        if (IPS_GetName($id) !== $name) {
             IPS_SetName($id, $name);
         }
         return $id;
     }
 
-    private function ensureLink(int $parentId, int $targetId, string $fullKey, string $label): void
+    private function ensureLinkUnder(int $parentId, int $targetId, string $ident, string $name): void
     {
         if ($targetId <= 0 || !IPS_ObjectExists($targetId)) {
             return;
         }
-
-        $linkIdent = 'LNK_' . $this->makeIdent($fullKey);
-        $linkId = @IPS_GetObjectIDByIdent($linkIdent, $parentId);
-        if ($linkId <= 0) {
-            $linkId = IPS_CreateLink();
-            IPS_SetParent($linkId, $parentId);
-            IPS_SetIdent($linkId, $linkIdent);
+        $id = @IPS_GetObjectIDByIdent($ident, $parentId);
+        if ($id <= 0) {
+            $id = IPS_CreateLink();
+            IPS_SetParent($id, $parentId);
+            IPS_SetIdent($id, $ident);
         }
-        IPS_SetName($linkId, $label);
-        IPS_SetLinkTargetID($linkId, $targetId);
+        IPS_SetName($id, $name);
+        IPS_SetLinkTargetID($id, $targetId);
     }
 
     private function makeIdent(string $s): string
@@ -490,7 +607,7 @@ class TessieVehicle extends IPSModule
             curl_setopt($ch, CURLOPT_POSTFIELDS, $jsonBody);
             $headers[] = 'Content-Type: application/json';
         } else {
-            // POST ohne Payload: leeren Body + Content-Length 0 erzwingen
+            // POST without payload: force Content-Length: 0
             if ($methodUpper === 'POST') {
                 curl_setopt($ch, CURLOPT_POSTFIELDS, '');
                 $headers[] = 'Content-Length: 0';
