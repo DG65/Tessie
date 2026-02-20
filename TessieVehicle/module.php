@@ -279,7 +279,11 @@ class TessieVehicle extends IPSModule
         // Telemetry data format is documented by Tessie: array of {key, value} [14](https://developer.tessie.com/reference/access-tesla-fleet-telemetry)[2](https://adsoba-my.sharepoint.com/personal/d_gureth_adsoba_de/Documents/Microsoft%20Copilot%20Chat-Dateien/dump.txt)
         $locked = null;
         $limit  = null;
-        $amps   = null;
+        $amps   = null;       
+        $req    = null;
+        $act    = null;
+        $max    = null;
+
 
         foreach ($dataItems as $item) {
             if (!is_array($item)) {
@@ -297,7 +301,14 @@ class TessieVehicle extends IPSModule
                 $limit = (int)$val['intValue'];
             } elseif ($key === 'ChargeCurrentRequest' && array_key_exists('intValue', $val)) {
                 $amps = (int)$val['intValue'];
+            } elseif ($key === 'ChargeCurrentRequest' && array_key_exists('intValue', $val)) {
+                $req = (int)$val['intValue'];
+            } elseif ($key === 'ChargeAmps' && array_key_exists('doubleValue', $val)) {
+                $act = (float)$val['doubleValue'];
+            } elseif ($key === 'ChargeCurrentRequestMax' && array_key_exists('intValue', $val)) {
+                $max = (int)$val['intValue'];
             }
+
         }
 
         if ($locked !== null) {
@@ -308,6 +319,14 @@ class TessieVehicle extends IPSModule
         }
         if ($amps !== null) {
             $this->safeSetValue(self::ACT_CHARGING_AMPS, $amps);
+        }
+        if ($req !== null) {
+            $this->safeSetValue(self::ACT_CHARGING_AMPS, $req);          // Sollwert, Action-Variable
+        }
+        if ($act !== null) {
+            $this->safeSetValue(self::STAT_CHARGE_AMPS_ACTUAL, $act);   // Istwert
+        }
+        if ($max !== null) {$this->safeSetValue(self::STAT_CHARGE_AMPS_MAX, $max);      // Max
         }
     }
 
