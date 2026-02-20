@@ -1,0 +1,70 @@
+{
+  "elements": [
+    {
+      "type": "ValidationTextBox",
+      "name": "ApiToken",
+      "caption": "Tessie Access Token"
+    },
+    {
+      "type": "ValidationTextBox",
+      "name": "VIN",
+      "caption": "VIN"
+    },
+    {
+      "type": "ValidationTextBox",
+      "name": "ApiBase",
+      "caption": "API Base URL",
+      "default": "https://api.tessie.com"
+    },
+    {
+      "type": "NumberSpinner",
+      "name": "UpdateInterval",
+      "caption": "Update Intervall (Sekunden)",
+      "minimum": 0,
+      "maximum": 3600
+    },
+    {
+      "type": "CheckBox",
+      "name": "TelemetryEnabled",
+      "caption": "Telemetry (WebSocket) aktiv"
+    },
+    {
+      "type": "CheckBox",
+      "name": "WakeBeforeCommands",
+      "caption": "Vor Commands aufwecken"
+    },
+    {
+      "type": "CheckBox",
+      "name": "WaitForCompletion",
+      "caption": "Auf Abschluss warten (wait_for_completion=true)"
+    },
+    {
+      "type": "CheckBox",
+      "name": "DebugHTTP",
+      "caption": "HTTP Debug (URL loggen)"
+    },
+    {
+      "type": "SelectCategory",
+      "name": "InstanceLocation",
+      "caption": "Ablageort Instanz (Parent Kategorie)",
+      "hint": "Wenn gesetzt, wird die Instanz in diese Kategorie verschoben. Variablen bleiben unter der Instanz."
+    },
+    {
+      "type": "SelectCategory",
+      "name": "LinksLocation",
+      "caption": "Ablageort Links (Root Kategorie)",
+      "hint": "Unter dieser Kategorie wird eine Hauptkategorie mit dem Fahrzeugnamen angelegt, inkl. Zweck-Unterkategorien."
+    },
+    {
+      "type": "CheckBox",
+      "name": "CreateLinks",
+      "caption": "Links anlegen/aktualisieren"
+    }
+  ],
+  "actions": [
+    {
+      "type": "Label",
+      "caption": "Hinweis: Die Links dienen der Übersicht und werden automatisch nach Zweck (Aktionen/Status/Laden/Klima/Sicherheit) einsortiert."
+    }
+  ]
+}
