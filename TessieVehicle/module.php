@@ -355,6 +355,9 @@ class TessieVehicle extends IPSModule
         $this->EnableAction(self::ACT_CHARGING_AMPS);
         $this->ensureLink($catId, $this->GetIDForIdent(self::ACT_CHARGING_AMPS), 'action.charging_amps', 'Ladestrom (A)');
 
+        $this->MaintainVariable(self::STAT_CHARGE_AMPS_ACTUAL, 'Ladestrom Ist (A)', VARIABLETYPE_FLOAT, 'Tessie.AmpsFloat', 0, true);
+        $this->MaintainVariable(self::STAT_CHARGE_AMPS_MAX,    'Ladestrom Max (A)', VARIABLETYPE_INTEGER, 'Tessie.Amps', 0, true);
+
         // Button: flash (reset after press)
         $this->MaintainVariable(self::ACT_FLASH, 'Licht blinken', VARIABLETYPE_BOOLEAN, '~Switch', 0, true);
         $this->EnableAction(self::ACT_FLASH);
@@ -386,6 +389,14 @@ class TessieVehicle extends IPSModule
             IPS_SetVariableProfileValues('Tessie.Amps', 0, 48, 1);
             IPS_SetVariableProfileDigits('Tessie.Amps', 0);
             IPS_SetVariableProfileIcon('Tessie.Amps', 'Electricity');
+        }
+
+        if (!IPS_VariableProfileExists('Tessie.AmpsFloat')) {
+            IPS_CreateVariableProfile('Tessie.AmpsFloat', VARIABLETYPE_FLOAT);
+            IPS_SetVariableProfileText('Tessie.AmpsFloat', '', ' A');
+            IPS_SetVariableProfileValues('Tessie.AmpsFloat', 0, 48, 0);
+            IPS_SetVariableProfileDigits('Tessie.AmpsFloat', 1);
+            IPS_SetVariableProfileIcon('Tessie.AmpsFloat', 'Electricity');
         }
     }
 
