@@ -4,13 +4,15 @@ declare(strict_types=1);
 class TessieVehicle extends IPSModule
 {
     // -------- Variable Idents (Actions) --------
-    private const ACT_LOCKED         = 'act_locked';
-    private const ACT_CLIMATE        = 'act_climate';
-    private const ACT_START_CHARGING = 'act_charging';
-    private const ACT_CHARGE_LIMIT   = 'act_charge_limit';
-    private const ACT_CHARGING_AMPS  = 'act_charging_amps';
-    private const ACT_FLASH          = 'act_flash';
-    private const ACT_HONK           = 'act_honk';
+        private const ACT_LOCKED             = 'act_locked';
+    private const ACT_CLIMATE                = 'act_climate';
+    private const ACT_START_CHARGING         = 'act_charging';
+    private const ACT_CHARGE_LIMIT           = 'act_charge_limit';
+    private const ACT_CHARGING_AMPS          = 'act_charging_amps';
+    private const STAT_CHARGE_AMPS_ACTUAL    = 'stat_charge_amps_actual';
+    private const STAT_CHARGE_AMPS_MAX       = 'stat_charge_amps_max';
+    private const ACT_FLASH                  = 'act_flash';
+    private const ACT_HONK                   = 'act_honk';
 
     // -------- Timers --------
     private const TIMER_UPDATE = 'UpdateTimer';
